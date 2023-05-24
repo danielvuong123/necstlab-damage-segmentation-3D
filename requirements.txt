@@ -1,16 +1,18 @@
 numpy
-tensorflow-gpu == 2.4.0
+tensorflow-gpu == 2.8.0
 opencv-python
 scikit-image
-sklearn
+scikit-learn
 progress
 Keras
 ipython
 segmentation-models
+segmentation-models-3D
 pytz
-tensorboard == 2.4.0
+tensorboard == 2.8.0
 pillow
 pandas
+patchify
 google-cloud-storage
 pyyaml
 jupyter
@@ -19,5 +21,6 @@ gitpython
 matplotlib
 ipykernel
 scipy
+tifftools
 psutil
 GPUtil
