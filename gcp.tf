@@ -28,7 +28,7 @@ resource "google_compute_instance" "vm" {
 
  boot_disk {
     initialize_params {
-      image = "projects/ubuntu-os-cloud/global/images/ubuntu-1804-bionic-v20201211a"
+      image = "projects/ml-images/global/images/c1-deeplearning-tf-2-8-cu113-v20221107-debian-10"
       size = "${var.hard_drive_size_gp}"
       type = "pd-ssd"
     }
