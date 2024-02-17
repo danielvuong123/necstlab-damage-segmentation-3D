@@ -1,6 +1,7 @@
 import os
 import shutil
 import random
+from skimage import io
 import numpy as np
 from tensorflow import random as tf_random
 import yaml
@@ -13,6 +14,11 @@ from models import generate_compiled_segmentation_model
 from image_utils import str2bool
 from metrics_utils import global_threshold
 from local_utils import local_folder_has_files, getSystemInfo, getLibVersions
+from patchify import patchify, unpatchify
+import tifftools
+import tifffile as tif
+from tqdm import tqdm
+
 
 
 # infer can be run multiple times (labels, overlay), create new metadata each time
@@ -32,6 +38,24 @@ class_colors = [
 
 
 def stitch_preds_together(tiles, target_size_1d, labels_output, pad_output, image):
+
+    #Once again, deal with the 3D case on it's own:
+    if target_size_1d <= 64:
+        #Again, the output MUST be padded in the 3D case, so we remove the padding.
+        padded_image_size = target_size_1d * np.ceil(np.asarray(image.shape) / target_size_1d).astype(int)
+        volume = unpatchify(tiles,padded_image_size) #Should be of shape of
+        delta_w = padded_image_size[0] - image.shape[0]
+        delta_l = padded_image_size[1] - image.shape[1]
+        delta_h = padded_image_size[2] - image.shape[2]
+
+        #Slice away the padding, keeping the orignal image.
+        predictions_without_padding = volume[(delta_w // 2)+(1*delta_w):(delta_w // 2)+1+image.shape[0], (delta_l // 2)+1:(delta_l // 2)+1+image.shape[1], (delta_h // 2)+1:(delta_h // 2)+1+image.shape[2]]
+
+        #Ensure that we have the correct dimensions for the predictions
+        assert predictions_without_padding.shape == image.shape
+
+        return (predictions_without_padding*255).astype('uint8')
+
     n_tile_rows = len(tiles)
     n_tile_cols = len(tiles[0])
     if not pad_output:
@@ -55,8 +79,50 @@ def stitch_preds_together(tiles, target_size_1d, labels_output, pad_output, imag
         stitched_image = Image.fromarray(stitched_array.astype('uint8'))
     return stitched_image
 
+def prepare_image_3D(image, target_size_1d, pad_output):
+    '''
+    image: array that is WxHxD representing our image.
+    target_size_1d: The new desired size of the image
+    pad_output: Placeholder variable
+
+    Returns: In this case, a (x,y,z,W,H,D,3) shape output.
+
+    Our model only accepts inputs of multiples of 64, however our input images
+    do not come in this size by default. We pad the image in order to obtain
+    the desired size.
+
+
+    '''
+    desired_size = target_size_1d * np.ceil(np.asarray(image.shape) / target_size_1d).astype(int)
+    delta_w = desired_size[0] - image.shape[0]
+    delta_l = desired_size[1] - image.shape[1]
+    delta_h = desired_size[2] - image.shape[2]
+
+    #Images MUST be padded for 3D
+    paddingw = (delta_w // 2,delta_w - (delta_w // 2))
+    paddingl = (delta_l // 2,delta_l - (delta_l // 2))
+    paddingh = (delta_h // 2,delta_h - (delta_h // 2))
+    padding = (paddingw,paddingl,paddingh)
+
+    #Pad the image on all sides with the average of the pixels
+    padded_image = np.pad(image,padding,'mean')
+
+    tiles = patchify(padded_image,(target_size_1d,)*3,step = target_size_1d)
+    shape_3D = tiles.shape
+    tiles = tiles * 1./255
+
+    #Assert that the minimum at this point is zero
+    #and the that maximum is 1
+    assert np.min(tiles) >= 0
+    assert np.max(tiles) <= 1
+
+    return tiles
 
 def prepare_image(image, target_size_1d, pad_output):
+    #If the targetsize is larger than 2D return the 3D version instead.
+    if target_size_1d <= 64:
+        return prepare_image_3D(image, target_size_1d, pad_output)
+
     # make the image an event multiple of 512x512
     desired_size = target_size_1d * np.ceil(np.asarray(image.size) / target_size_1d).astype(int)
     delta_w = desired_size[0] - image.size[0]
@@ -95,10 +161,33 @@ def prepare_image(image, target_size_1d, pad_output):
 
 
 def overlay_predictions(prepared_tiles, preds, prediction_threshold, background_class_index, labels_output):
+
+    #Again, deal with the 3D case on it's own:
+    if not isinstance(preds,list):
+        assert prepared_tiles.shape == preds.shape
+
+        if labels_output:
+            prediction_tiles = np.where(preds > 0,preds,0)
+        else:
+            prediction_tiles = np.where(preds > 0,preds,prediction_tiles)
+            final_shape = prepared_tiles.shape
+            np.zeros(prediction_tiles.shape)
+            for i in range(len(prepared_tiles)):
+                for j in range(len(prepared_tiles[i])):
+                    for k in range(len(prepared_tiles[j])):
+                        prediction_tiles[i,j,k] = np.dstack((prepared_tiles,)*3)
+                        prediction_tiles[i,j,k] = (prediction_tiles[i,j,k] * 255).astype(int)
+
+                        ####CURRENTLY ONLY WORKS WITH SINGLE CLASS, WORK ON MULTICLASS####
+
+        return prediction_tiles
+
+
     prediction_tiles = []
     for i in range(len(prepared_tiles)):
         prediction_tiles.append([])
         for j in range(len(prepared_tiles[i])):
+            #Make a 3 channel prediction value
             prediction_tiles[i].append(np.dstack((prepared_tiles[i][j], prepared_tiles[i][j], prepared_tiles[i][j])))
             prediction_tiles[i][j] = (prediction_tiles[i][j] * 255).astype(int)
 
@@ -123,12 +212,57 @@ def overlay_predictions(prepared_tiles, preds, prediction_threshold, background_
 def segment_image(model, image, prediction_threshold, target_size_1d, background_class_index,
                   labels_output, pad_output):
 
+    #In the 3D case this returns a (x,y,z,W,H,D) output
     prepared_tiles = prepare_image(image, target_size_1d, pad_output)
+
+    #Deal with 3D case on it's own
+    if target_size_1d <= 64:
+        #Start with a empty array of the desired shape.
+        preds = np.zeros(prepared_tiles.shape)
+        print(prepared_tiles.shape)
+        predicted_3D_patches = []
+        for i in range(prepared_tiles.shape[0]):
+            for j in range(prepared_tiles.shape[1]):
+                for k in range(prepared_tiles.shape[2]):
+                    single_patch = prepared_tiles[i,j,k,:,:,:]
+                    prediction = model.predict(np.expand_dims(single_patch,axis=0))
+                    prediction_rounded = np.round(prediction)[0,:,:,:,0] #Ignoreing thresholding
+                    predicted_3D_patches.append(prediction_rounded) ####Temporary Analysis####
+                    #preds[i,j,k,:,:,:] = prediction_rounded #prediction is now 64x64x64
+
+        #TEMPORARY FIX: Just return the labels, ignore everything else.
+        predicted_patches_3D = np.array(predicted_3D_patches)
+        predicted_patches_3D_reshaped = np.reshape(predicted_patches_3D,prepared_tiles.shape)
+        desired_size = target_size_1d * np.ceil(np.asarray(image.shape) / target_size_1d).astype(int)
+        reconstructed_image_3D = unpatchify(predicted_patches_3D_reshaped,desired_size)
+        delta_w = desired_size[0] - image.shape[0]
+        delta_l = desired_size[1] - image.shape[1]
+        delta_h = desired_size[2] - image.shape[2]
+
+        if delta_w == 0:
+            predictions_without_padding = reconstructed_image_3D[(delta_w // 2):(delta_w // 2)+image.shape[0], (delta_l // 2):(delta_l // 2)+image.shape[1], (delta_h // 2):(delta_h // 2)+image.shape[2]]
+        else:
+            predictions_without_padding = reconstructed_image_3D[(delta_w // 2):(delta_w // 2)+image.shape[0], (delta_l // 2):(delta_l // 2)+image.shape[1], (delta_h // 2):(delta_h // 2)+image.shape[2]]
+
+        assert predictions_without_padding.shape == image.shape
+
+        return (predictions_without_padding*255).astype('uint8')
+        #End TEMPORARY code.
+
+        #Prepared_tiles are the raw images, we blank them out
+        #if we are only looking at the labels output
+        if labels_output:
+            prepared_tiles = np.zeros(prepared_tiles.shape)
+        pred_tiles = overlay_predictions(prepared_tiles, preds, prediction_threshold, background_class_index, labels_output)
+        stitched_pred = stitch_preds_together(pred_tiles, target_size_1d, labels_output, pad_output, image)
+        return stitched_pred
 
     preds = []
     for i in range(len(prepared_tiles)):
         preds.append([])
         for j in range(len(prepared_tiles[i])):
+            #prepared_tiles = 512x512, reshape makes it 1x512x512x1,
+            #Fetching the first index of the prediction then gives us a 512,512,1 3d output.
             preds[i].append(model.predict(prepared_tiles[i][j].reshape(1, target_size_1d,
                                                                        target_size_1d, 1))[0, :, :, :])
 
@@ -142,6 +276,47 @@ def segment_image(model, image, prediction_threshold, target_size_1d, background
     stitched_pred = stitch_preds_together(pred_tiles, target_size_1d, labels_output, pad_output, image)
     return stitched_pred
 
+
+def merge_tifs(directory,input_tifs,name="tmp"):
+    """
+    directory:
+        directory where the images are stored.
+    input_tifs:
+        a list of tif images to be merged
+    name:
+        name of the output file
+    """
+    image = tifftools.read_tiff(input_tifs[0])
+    for input in input_tifs[1:]:
+        next_image = tifftools.read_tiff(input)
+        image['ifds'].extend(next_image['ifds'])
+
+    tifftools.write_tiff(image,directory.as_posix() + "/" + name + ".tif")
+    return directory.as_posix() + "/" + name + ".tif"
+
+def merge_directory_tif(directory,name="tmp"):
+    """
+    directory (str):
+        name of directory with .tif images to be merged into a singlular tif file
+    name (str):
+        name of the compiled tif image, defaulted to "temp"
+
+    returns (str):
+        Name of the file created
+    """
+    image = None
+    count =0
+    for filename in sorted(os.listdir(directory)):
+        count+=1
+        # print(count)
+        if image is None:
+            image = tifftools.read_tiff(os.path.join(directory, filename))
+        else:
+            next_image = tifftools.read_tiff(os.path.join(directory, filename))
+            image['ifds'].extend(next_image['ifds'])
+
+    tifftools.write_tiff(image,directory.as_posix() + "/" + name + ".tif")
+    return directory.as_posix() + "/" + name + ".tif"
 
 def main(gcp_bucket, model_id, background_class_index, stack_id, image_ids, user_specified_prediction_thresholds,
          labels_output, pad_output, trained_thresholds_id, random_module_global_seed, numpy_random_global_seed,
@@ -257,7 +432,36 @@ def main(gcp_bucket, model_id, background_class_index, stack_id, image_ids, user
     pad_output = str2bool(pad_output)
 
     n_images = len(list(Path(image_folder).iterdir()))
+
+    if len(model_metadata['target_size']) > 2:
+        # full_stack_image = merge_directory_tif(Path(image_folder),'full_stack_image')
+        # full_stack_image = io.imread(full_stack_image)
+        # segmented_image = segment_image(compiled_model,full_stack_image,prediction_threshold,
+        #                     target_size_1d, background_class_index,labels_output,pad_output)
+        # for i in range(n_images):
+        #     tif.imsave(output_dir + "inference" + str(i) + '.tif', segmented_image[i,:,:])
+        stacked_segmented_images = []
+        index = 0
+        for i in range(len(sorted(Path(image_folder).iterdir()))//64):
+            current_stack = sorted(Path(image_folder).iterdir())[64*i:i*64+64]
+            stacked_image = merge_tifs(Path(image_folder),current_stack,f"stack_{i}")
+            stacked_image = io.imread(stacked_image)
+            segmented_image = segment_image(compiled_model,stacked_image,prediction_threshold,
+                                            target_size_1d, background_class_index,labels_output,pad_output)
+            for j in range(segmented_image.shape[0]):
+                tif.imsave(output_dir.as_posix() + f"inference_{index:04}" + ".tif", segmented_image[j,:,:])
+                index += 1
+
+        # for segmented_stack in stacked_segmented_images:
+        #     for i in range(segmented_stack.shape[0]):
+        #         tif.imsave(output_dir.as_posix() + f"inference_{index}" + ".tif",segmented_stack[i,:,:])
+        #         index +=1
+
+
     for i, image_file in enumerate(sorted(Path(image_folder).iterdir())):
+        #Don't go into this loop if we have a 3D input
+        if len(model_metadata['target_size']) > 2:
+            break
         if image_file.parts[-1] in images_list:
             print('Segmenting image {} --- stack has {} images...'.format(image_file.parts[-1], n_images))
 

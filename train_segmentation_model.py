@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import ipykernel    # needed when using many metrics, to avoid automatic verbose=2 output
 from tensorflow.keras.callbacks import ModelCheckpoint, TensorBoard, CSVLogger, Callback
 from image_utils import TensorBoardImage, ImagesAndMasksGenerator
+from patchify import patchify, unpatchify
 import git
 from gcp_utils import copy_folder_locally_if_missing
 from models import generate_compiled_segmentation_model
@@ -88,6 +89,26 @@ def generate_plots(metric_names, x_values, results_history, plots_dir, num_rows=
 
 
 def check_pretrained_model_compatibility(pretrained_model_config, pretrained_model_metadata, train_config, dataset_config, train_generator):
+    '''
+    Asserts that
+
+    Used for checking the compatability of the training config file with the
+    config of the pretrained model.
+
+    Parameters
+    ----------
+    trained_model_config : Dict
+        Config file (.yaml file) of the pretrained model to be loaded
+    pretrained_model_metadata : Dict
+        Dictionary containing information on the number of classes and target size of the pretrained model
+    train_config : Dict
+        Config file for the current training session
+    dataset_config : Dict
+        Metadata for the current training session (target size)
+    train_generator : Unknown
+
+    '''
+
     # confirm that the current model and pretrained model configurations are compatible
     assert pretrained_model_config['segmentation_model']['model_name'] == train_config['segmentation_model']['model_name']
     assert pretrained_model_config['segmentation_model']['model_parameters']['backbone_name'] == train_config['segmentation_model']['model_parameters']['backbone_name']
@@ -109,6 +130,12 @@ def check_pretrained_model_compatibility(pretrained_model_config, pretrained_mod
 
 
 def sample_image_and_mask_paths(generator, n_paths):
+    '''
+
+
+    Parameters
+    ----------
+    '''
     rand_inds = [random.randint(0, len(generator.image_filenames) - 1) for _ in range(n_paths)]
     image_paths = list(np.asarray(generator.image_filenames)[rand_inds])
     mask_paths = [{c: list(np.asarray(generator.mask_filenames[c]))[i] for c in generator.mask_filenames} for i in rand_inds]
@@ -131,7 +158,7 @@ def train(gcp_bucket, config_file, random_module_global_seed, numpy_random_globa
 
     assert "gs://" in gcp_bucket
 
-    # clean up the tmp directory
+    #clean up the tmp directory
     try:
         shutil.rmtree(tmp_directory.as_posix())
     except FileNotFoundError:
@@ -165,6 +192,8 @@ def train(gcp_bucket, config_file, random_module_global_seed, numpy_random_globa
     batch_size = train_config['batch_size']
     epochs = train_config['epochs']
 
+    #train_generator feeds the images and their labels to the model to be trained,
+    #We define the parameters of it here.
     train_generator = ImagesAndMasksGenerator(
         Path(local_dataset_dir, train_config['dataset_id'], 'train').as_posix(),
         rescale=1. / 255,
@@ -172,8 +201,10 @@ def train(gcp_bucket, config_file, random_module_global_seed, numpy_random_globa
         batch_size=batch_size,
         shuffle=True,
         random_rotation=train_config['data_augmentation']['random_90-degree_rotations'],
-        seed=None if 'training_data_shuffle_seed' not in train_config else train_config['training_data_shuffle_seed'])
+        seed=None if 'training_data_shuffle_seed' not in train_config else train_config['training_data_shuffle_seed'],
+        class_weight=None) ##ADD FOR CLASS WEIGHTS##
 
+    #Similar to train_generator however, this is for the validation step.
     validation_generator = ImagesAndMasksGenerator(
         Path(local_dataset_dir, train_config['dataset_id'],
              'validation').as_posix(),
@@ -210,7 +241,7 @@ def train(gcp_bucket, config_file, random_module_global_seed, numpy_random_globa
     compiled_model = generate_compiled_segmentation_model(
         train_config['segmentation_model']['model_name'],
         train_config['segmentation_model']['model_parameters'],
-        len(train_generator.mask_filenames),
+        len(train_generator.mask_filenames), #Number of classes
         train_config['loss'],
         train_config['optimizer'],
         path_pretrained_model)
@@ -222,16 +253,20 @@ def train(gcp_bucket, config_file, random_module_global_seed, numpy_random_globa
     tensorboard_callback = TensorBoard(log_dir=logs_dir.as_posix(), write_graph=True,
                                        write_grads=False, write_images=True, update_freq='epoch', profile_batch=0)
 
-    n_sample_images = 20
-    train_image_and_mask_paths = sample_image_and_mask_paths(train_generator, n_sample_images)
-    validation_image_and_mask_paths = sample_image_and_mask_paths(validation_generator, n_sample_images)
+    ###############
+    #Unsure wha these 3 lines do? These two variables are never used again.
+    ###############
+    # n_sample_images = 20
+    # train_image_and_mask_paths = sample_image_and_mask_paths(train_generator, n_sample_images)
+    # validation_image_and_mask_paths = sample_image_and_mask_paths(validation_generator, n_sample_images)
 
     csv_logger_callback = CSVLogger(Path(model_dir, 'metrics.csv').as_posix(), append=True)
     time_callback = timecallback()  # model_dir, plots_dir, 'metrics_epochtime.csv')
 
+    #Training call
     results = compiled_model.fit(
         train_generator,
-        steps_per_epoch=len(train_generator),
+        steps_per_epoch=len(train_generator), #Pass through the whole generator per epoch.
         epochs=epochs,
         validation_data=validation_generator,
         validation_steps=len(validation_generator),

@@ -16,8 +16,10 @@ from metrics_utils import (OneHotAccuracyTfKeras, OneHotFalseNegatives, OneHotFa
                            OneHotClassBinaryAccuracySM, FBetaScore, OneHotFBetaScore, IoUScore, OneHotIoUScore,
                            global_threshold)
 os.environ['SM_FRAMEWORK'] = 'tf.keras'  # will tell segmentation models to use tensorflow's keras
-from segmentation_models import Unet, FPN, Linknet
+# from segmentation_models import Unet, FPN, Linknet
 from segmentation_models.losses import CategoricalCELoss
+import segmentation_models as sm2D
+import segmentation_models_3D as sm3D
 
 
 thresholds_training_history = {}
@@ -38,32 +40,42 @@ loss_dict = {'binary_cross_entropy': BinaryCrossentropyL(),
              'cross_entropy': BinaryCrossentropyL(),
              'categorical_cross_entropy': CategoricalCrossentropyL(),
              'mean_squared_error': MeanSquaredError(),
-             'mean_absolute_error': MeanAbsoluteError()
+             'mean_absolute_error': MeanAbsoluteError(),
+             'dice_loss':sm3D.losses.DiceLoss(class_weights=np.array([.00001,.99999])),
              }
 
 # this one has to be inside because of the arguments inside the class: num_classes=num_classes, **model_parameters
-models_dict = {'Unet': {
-    'model_class': Unet,
-    'compatible_backbones': ['vgg16', 'vgg19', 'resnet18', 'seresnet18', 'inceptionv3', 'mobilenet', 'efficientnetb0']},
+models_dict = {
+    'Unet': {
+        'model_class': sm2D.Unet,
+        'compatible_backbones': ['vgg16', 'vgg19', 'resnet18', 'seresnet18', 'inceptionv3', 'mobilenet', 'efficientnetb0']},
     'FPN': {
-    'model_class': FPN,
-    'compatible_backbones': ['vgg16', 'vgg19', 'resnet18', 'seresnet18', 'resnext50', 'seresnext50', 'inceptionv3', 'mobilenet', 'efficientnetb0']},
+        'model_class': sm2D.FPN,
+        'compatible_backbones': ['vgg16', 'vgg19', 'resnet18', 'seresnet18', 'resnext50', 'seresnext50', 'inceptionv3', 'mobilenet', 'efficientnetb0']},
     'Linknet': {
-    'model_class': Linknet,
-    'compatible_backbones': ['vgg16', 'vgg19', 'resnet18', 'seresnet18', 'inceptionv3', 'mobilenet']}
+        'model_class': sm2D.Linknet,
+        'compatible_backbones': ['vgg16', 'vgg19', 'resnet18', 'seresnet18', 'inceptionv3', 'mobilenet']},
+    '3DUnet': {
+        'model_class': sm3D.Unet,
+        'compatible_backbones': ['vgg16', 'vgg19', 'resnet18', 'seresnet18', 'inceptionv3', 'mobilenet', 'efficientnetb0']}
 }
 
+
+##Here we want to add a dimensionality parameter, to which we can then change if it is 3d or 2d
 
 def generate_compiled_segmentation_model(model_name, model_parameters, num_classes, loss, optimizer,
                                          weights_to_load=None, optimizing_threshold_class_metric=None,
                                          optimizing_class_id=None, optimizing_input_threshold=None,
-                                         optimized_class_thresholds=None):
+                                         optimized_class_thresholds=None,compute_roc=False):
 
     # alter input_shape due to inability of yaml to accept tuples!
     if 'input_shape' in model_parameters:
         model_parameters['input_shape'] = tuple(model_parameters['input_shape'])
     else:  # to guarantee the V1 config files still work
-        model_parameters['input_shape'] = (None, None, 1)
+        if model_name.startswith("3D"):
+            model_parameters['input_shape'] = (None, None, None, 1)
+        else:
+            model_parameters['input_shape'] = (None, None, 1)
 
     # Select the optimizer as a function of the name in the config file
     if optimizer.lower() in optimizer_dict:
@@ -91,6 +103,9 @@ def generate_compiled_segmentation_model(model_name, model_parameters, num_class
         all_metrics.append(BinaryCrossentropyM(name='binary_ce_metric'))
     else:
         all_metrics.append(CategoricalCrossentropyM(name='categ_ce_metric'))
+
+    #Ignore everything basically:
+    #global_threshold = optimized_class_thresholds
 
     # standard thresholded version (default threshold is 0.5) also kept below, in case it's desired in certain scenario
     for class_num in range(num_classes + 1):
@@ -172,7 +187,8 @@ def generate_compiled_segmentation_model(model_name, model_parameters, num_class
 
     model.compile(optimizer=optimizer_fn,
                   loss=loss_fn,
-                  metrics=all_metrics)
+                  metrics=all_metrics
+                  )
 
     if weights_to_load:
         model.load_weights(weights_to_load)
@@ -218,7 +234,7 @@ class EvaluateModelForInputThreshold:
             optimizing_input_threshold=input_threshold)
         all_results = optimizing_model.evaluate(self.dataset_generator,
                                                 steps=np.ceil(self.dataset_downsample_factor *
-                                                              len(self.dataset_generator)).astype(int))
+                                                              len(self.dataset_generator)).astype(int))## This steps funciton doesn work with 3D? don't downsample when thresholding 3D
 
         metric_names = [m.name for m in optimizing_model.metrics]
 
@@ -262,7 +278,7 @@ def train_prediction_thresholds(optimizing_class_id, optimizing_threshold_class_
                                   'opt_options': opt_options, 'opt_class_metric': optimizing_threshold_class_metric,
                                   'opt_dataset_generator': dataset_generator.dataset_directory,
                                   'opt_dataset_downsample_factor': dataset_downsample_factor}
-    training_threshold_output = minimize_scalar(optimizing_compiled_model, bounds=(opt_bounds[0], opt_bounds[1]),
+    training_threshold_output = minimize_scalar(optimizing_compiled_model, bounds=(opt_bounds[0], opt_bounds[1]), #if fun(something) is the problem, we look at optimizing_compiled_model
                                                 method=opt_method, tol=opt_tol, options=opt_options)
 
     return training_threshold_output, optimization_configuration

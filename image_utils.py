@@ -6,8 +6,9 @@ import tensorflow as tf
 from tensorflow.keras.utils import Sequence
 import tensorflow.keras as keras
 from PIL import Image
-import io
-
+import io as IO
+from skimage import io
+import segmentation_models_3D as sm3
 
 class_RGB_mapping = {
     'class_0': None,
@@ -60,7 +61,7 @@ def make_image(tensor):
     """
     height, width, channel = tensor.shape
     image = Image.fromarray(tensor)
-    output = io.BytesIO()
+    output = IO.BytesIO()
     image.save(output, format='PNG')
     image_string = output.getvalue()
     output.close()
@@ -92,7 +93,7 @@ class TensorBoardImage(keras.callbacks.Callback):
 
 # adapted from: https://stanford.edu/~shervine/blog/keras-how-to-generate-data-on-the-fly
 class ImagesAndMasksGenerator(Sequence):
-    def __init__(self, dataset_directory, rescale, target_size, batch_size, shuffle=False, seed=None, random_rotation=False):
+    def __init__(self, dataset_directory, rescale, target_size, batch_size, shuffle=False, seed=None, random_rotation=False,class_weight=None):
         self.dataset_directory = dataset_directory
         self.image_filenames = sorted(Path(self.dataset_directory, 'images').iterdir())
         self.mask_filenames = OrderedDict()
@@ -107,10 +108,20 @@ class ImagesAndMasksGenerator(Sequence):
         self.indexes = None
         self.random_rng = random.Random(self.seed)  # random number generator instance
         self.numpy_rng = np.random.default_rng(self.seed)  # np random number generator instance
+        self.class_weight = tf.constant(class_weight) if class_weight is not None else None
         self.on_epoch_end()
 
     def __len__(self):
         return int(np.floor(len(self.image_filenames) / self.batch_size))
+
+
+    def add_sample_weights(self,image,label):
+        self.class_weight = self.class_weight/tf.reduce_sum(self.class_weight)
+
+        sample_weights = tf.gather(self.class_weight,indices=tf.cast(label,tf.int32))
+
+        return image,label,sample_weights
+
 
     def __getitem__(self, index):
         # Generate indexes of the batch
@@ -124,8 +135,10 @@ class ImagesAndMasksGenerator(Sequence):
 
         # Generate data
         images, masks = self.__data_generation(batch_image_filenames, batch_mask_filenames)
-
-        return images, masks
+        if self.class_weight is not None:
+            return self.add_sample_weights(images,masks)
+        else:
+            return images, masks
 
     def on_epoch_end(self):
         'Updates indexes after each epoch'
@@ -139,13 +152,28 @@ class ImagesAndMasksGenerator(Sequence):
 
         for i in range(len(batch_image_filenames)):
             rotation = 0
-            if self.random_rotation:
-                rotation = self.random_rng.sample([0, 90, 180, 270], k=1)[0]
-            images[i, :, :, 0] = np.asarray(Image.open(batch_image_filenames[i]).rotate(rotation))
-            for j, c in enumerate(self.mask_filenames):
-                masks[i, :, :, j] = np.asarray(Image.open(batch_mask_filenames[c][i]).rotate(rotation))
+            if len(self.target_size) > 2:
+                if self.random_rotation:
+                    avalible_axes = [0,1,2]
+                    rotation = self.random_rng.sample([0, 1, 2, 3], k=1)[0]
+                    starting = self.random_rng.sample(avalible_axes,k=1)[0]
+                    avalible_axes.remove(starting)
+                    ending = self.random_rng.sample(avalible_axes,k=1)[0]
+                else:
+                    starting = 0
+                    ending = 1
+                images[i,:,:,:,0] = np.rot90(io.imread(batch_image_filenames[i]),rotation,axes=(starting,ending))
+                for j,c in enumerate(self.mask_filenames):
+                    masks[i,:,:,:,j] =  np.rot90(io.imread(batch_mask_filenames[c][i]),rotation,axes=(starting,ending))
+            else:
+                if self.random_rotation:
+                    rotation = self.random_rng.sample([0, 90, 180, 270], k=1)[0]
+                images[i, :, :, 0] = np.asarray(Image.open(batch_image_filenames[i]).rotate(rotation))
+                for j, c in enumerate(self.mask_filenames):
+                    masks[i, :, :, j] = np.asarray(Image.open(batch_mask_filenames[c][i]).rotate(rotation))
 
         images = images * self.rescale
+
 
         return images, masks
 

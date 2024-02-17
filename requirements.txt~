@@ -1,0 +1,25 @@
+numpy
+tensorflow-gpu == 2.8.0
+opencv-python
+scikit-image
+sklearn
+progress
+Keras
+ipython
+segmentation-models
+segmentation-mddels-3D
+pytz
+tensorboard == 2.8.0
+pillow
+pandas
+patchify
+google-cloud-storage
+pyyaml
+jupyter
+crcmod
+gitpython
+matplotlib
+ipykernel
+scipy
+psutil
+GPUtil

@@ -16,8 +16,8 @@ assert SMOOTH <= 1e-5
 
 # 0.5 is default prediction threshold for most metrics which use a threshold value
 # and the threshold value is also effectively ignored for one hot metrics
-global_threshold = 0.5  
-assert 0.0 <= global_threshold <= 1.0 
+global_threshold = 0.5
+assert 0.0 <= global_threshold <= 1.0
 
 # In summary, to achieve one hot metrics:
 # 1. For a metric class who via definition inherits tf.keras.metrics.Metric or tf.keras.metric.MeanMetricWrapper, for
@@ -196,9 +196,9 @@ class FBetaScore(MetricTfKeras):
 
     '''
     Arguments
-        beta: The F-measure was derived so that F_β "measures the effectiveness of 
+        beta: The F-measure was derived so that F_β "measures the effectiveness of
             retrieval with respect to a user who attaches β times as much importance to recall as precision".
-            beta=1 gives F_1 score, and is also known as the Sørensen–Dice coefficient or Dice similarity 
+            beta=1 gives F_1 score, and is also known as the Sørensen–Dice coefficient or Dice similarity
             coefficient (DSC).
         thresholds: (Optional) A float value or a python list/tuple of float
             threshold values in [0, 1]. A threshold is compared with prediction

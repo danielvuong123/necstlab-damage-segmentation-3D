@@ -1,9 +1,7 @@
 #!/bin/bash
 
-echo "Running apt-get update"
 sudo apt-get update
 
-echo "Running install build-essentials"
 sudo apt-get install -y build-essential
 
 # install cuda for tf2.1
@@ -14,7 +12,6 @@ sudo apt-get install -y build-essential
 # sudo apt-key add /var/cuda-repo-wsl-ubuntu-11-2-local/7fa2af80.pub
 # sudo apt-get update
 # sudo apt-get -y install cuda
-echo "Executing export of cuda to path"
 export PATH=/usr/local/cuda-11.2/bin${PATH:+:${PATH}}
 
 
@@ -27,17 +24,14 @@ export PATH=/usr/local/cuda-11.2/bin${PATH:+:${PATH}}
 # sudo chmod a+r /usr/local/cuda/include/cudnn.h /usr/local/cuda/lib64/libcudnn*
 
 #Setup CUPTI path
-echo "Exporting cuda to library path"
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda-11.2/lib64
 
-echo "Exporting local system path to remote path"
 export PATH="/home/dcvuong/.local/bin:$PATH"
 # ls /..
 # ls
 # ls /..
 
 # install needed packages
-echo "installing python packages"
 sudo apt-get install -y cmake \
     git \
     python3-setuptools \
@@ -49,7 +43,6 @@ sudo apt-get install -y cmake \
     tree \
     p7zip-full
 
-echo "installing remaining packages."
 pip3 install -U pip
 pip3 install --upgrade setuptools
 pip3 uninstall crcmod -y
@@ -57,5 +50,4 @@ pip3 install --no-cache-dir crcmod
 pip3 install --upgrade pyasn1
 #The next line only works if your current username (In your command line) and the gcp username match
 
-echo "Executing last step, installing requirements.txt"
 cd necstlab-damage-segmentation && python3 -m pip install -r requirements.txt

@@ -9,7 +9,7 @@ from datetime import datetime
 import pytz
 import git
 from gcp_utils import copy_folder_locally_if_missing
-from image_utils import ImagesAndMasksGenerator
+from image_utils import ImagesAndMasksGenerator, str2bool
 from models import generate_compiled_segmentation_model
 from metrics_utils import global_threshold
 from local_utils import local_folder_has_files, getSystemInfo, getLibVersions
@@ -23,7 +23,7 @@ tmp_directory = Path('./tmp')
 
 
 def test(gcp_bucket, dataset_id, model_id, batch_size, trained_thresholds_id, random_module_global_seed,
-         numpy_random_global_seed, tf_random_global_seed, message):
+         numpy_random_global_seed, tf_random_global_seed, message, compute_roc):
 
     # seed global random generators if specified; global random seeds here must be int or default None (no seed given)
     if random_module_global_seed is not None:
@@ -89,27 +89,56 @@ def test(gcp_bucket, dataset_id, model_id, batch_size, trained_thresholds_id, ra
     else:
         optimized_class_thresholds = None
 
-    compiled_model = generate_compiled_segmentation_model(
-        train_config['segmentation_model']['model_name'],
-        train_config['segmentation_model']['model_parameters'],
-        len(test_generator.mask_filenames),
-        train_config['loss'],
-        train_config['optimizer'],
-        Path(local_model_dir, model_id, "model.hdf5").as_posix(),
-        optimized_class_thresholds=optimized_class_thresholds)
+    compute_roc = str2bool(compute_roc)
 
-    results = compiled_model.evaluate(test_generator)
+    if not compute_roc:
+        compiled_model = generate_compiled_segmentation_model(
+            train_config['segmentation_model']['model_name'],
+            train_config['segmentation_model']['model_parameters'],
+            len(test_generator.mask_filenames),
+            train_config['loss'],
+            train_config['optimizer'],
+            Path(local_model_dir, model_id, "model.hdf5").as_posix(),
+            optimized_class_thresholds=optimized_class_thresholds)
 
-    metric_names = [m.name for m in compiled_model.metrics]
+        results = compiled_model.evaluate(test_generator)
 
-    with Path(test_dir, str('metrics_' + test_datetime + '.csv')).open('w') as f:
-        f.write(','.join(metric_names) + '\n')
-        f.write(','.join(map(str, results)))
+        metric_names = [m.name for m in compiled_model.metrics]
 
-    metadata_sys = {
-        'System_info': getSystemInfo(),
-        'Lib_versions_info': getLibVersions()
-    }
+        with Path(test_dir, str('metrics_' + test_datetime + '.csv')).open('w') as f:
+            f.write(','.join(metric_names) + '\n')
+            f.write(','.join(map(str, results)))
+
+        metadata_sys = {
+            'System_info': getSystemInfo(),
+            'Lib_versions_info': getLibVersions()
+        }
+    else:
+        with Path(test_dir, str('metrics_' + test_datetime + '.csv')).open('w') as f:
+            for value in [.1,.2,.4,.6,.8,.9]:
+                print(f"Testing Threshold value: {value}")
+                threshhold = value
+                compiled_model = generate_compiled_segmentation_model(
+                    train_config['segmentation_model']['model_name'],
+                    train_config['segmentation_model']['model_parameters'],
+                    len(test_generator.mask_filenames),
+                    train_config['loss'],
+                    train_config['optimizer'],
+                    Path(local_model_dir, model_id, "model.hdf5").as_posix(),
+                    optimized_class_thresholds=threshhold,
+                    compute_roc=compute_roc)
+
+                results = compiled_model.evaluate(test_generator)
+
+                metric_names = [m.name for m in compiled_model.metrics]
+                if value ==.1:
+                    f.write(','.join(metric_names) + '\n')
+                f.write(','.join(map(str, results)) + '\n')
+
+        metadata_sys = {
+            'System_info': getSystemInfo(),
+            'Lib_versions_info': getLibVersions()
+        }
 
     metadata = {
         'message': message,
@@ -190,4 +219,10 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help='A str message the used wants to leave, the default is None.')
+    argparser.add_argument(
+        '--compute-roc',
+        type=str,
+        default='False',
+        help='if set to true, computes and saves a csv file of metrics with threshholds from .01 to .99'
+    )
     test(**argparser.parse_args().__dict__)
